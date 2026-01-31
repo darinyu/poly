@@ -34,3 +34,12 @@ futures-util = "0.3"
 
 # Date/time formatting
 chrono = "0.4"
+
+# RSA and cryptography for WebSocket authentication
+rsa = "0.9"
+sha2 = "0.10"
+base64 = "0.21"
+pkcs8 = { version = "0.10", features = ["pem"] }
+urlencoding = "2.1"
+http = "1.0"
+rand = "0.8"

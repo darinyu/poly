@@ -1,2 +1,9 @@
 websockets>=12.0
 requests>=2.31.0
+
+# Kalshi monitor dependencies
+python-dotenv>=1.0.0
+cryptography>=42.0.0
+
+# Optional: for WebSocket version with official client
+# kalshi-python
