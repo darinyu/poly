@@ -150,8 +150,9 @@ class PolymarketCLOBMonitor:
     WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     PING_INTERVAL = 20  # Built-in WebSocket ping interval
     PING_TIMEOUT = 20   # Timeout for ping response
+    BOOK_DEPTH = 5      # Number of price levels to display in order book
     
-    def __init__(self, asset_ids: List[str]):
+    def __init__(self, asset_ids: List[str], show_full_book: bool = False):
         self.asset_ids = asset_ids
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.running = False
@@ -162,6 +163,7 @@ class PolymarketCLOBMonitor:
         # Track last trade price and mid-price per asset
         self.last_trade_price: Dict[str, float] = {}
         self.last_mid_price: Dict[str, float] = {}
+        self.show_full_book = show_full_book  # Whether to show full order book depth
     
     def _get_timestamp(self) -> str:
         """Get formatted timestamp for logging"""
@@ -238,12 +240,14 @@ class PolymarketCLOBMonitor:
         try:
             asset_id = data.get('asset_id', 'UNKNOWN')
             
-            # Extract best bid and ask
+            # Extract bids and asks
             bids = data.get('bids', [])
             asks = data.get('asks', [])
             
-            best_bid = float(bids[0]['price']) if bids else None
-            best_ask = float(asks[0]['price']) if asks else None
+            # API returns asks sorted HIGHEST to LOWEST, so LAST item is best (lowest) ask
+            # API returns bids sorted LOWEST to HIGHEST, so LAST item is best (highest) bid
+            best_bid = float(bids[-1]['price']) if bids else None
+            best_ask = float(asks[-1]['price']) if asks else None
             
             # Calculate mid-price and spread
             mid_price = None
@@ -256,45 +260,123 @@ class PolymarketCLOBMonitor:
                 spread_bps = (spread / best_bid * 10000) if best_bid > 0 else None
                 self.last_mid_price[asset_id] = mid_price
             
-            # Format output
-            bid_str = f"{Colors.GREEN}{best_bid:.4f}{Colors.RESET}" if best_bid else "N/A"
-            ask_str = f"{Colors.RED}{best_ask:.4f}{Colors.RESET}" if best_ask else "N/A"
-            
-            # Add mid-price
-            mid_str = f" | Mid: {Colors.CYAN}{mid_price:.4f}{Colors.RESET}" if mid_price else ""
-            
-            # Add spread
-            spread_str = ""
-            if spread and spread_bps:
-                # Color code spread: green if tight (<1%), yellow if medium, red if wide
-                spread_pct = spread_bps / 100
-                if spread_pct < 1:
-                    spread_color = Colors.GREEN
-                elif spread_pct < 5:
-                    spread_color = Colors.YELLOW
-                else:
-                    spread_color = Colors.RED
-                spread_str = f" | Spread: {spread_color}{spread:.4f} ({spread_bps:.1f} bps){Colors.RESET}"
-            
-            # Add last trade price if available
-            last_trade_str = ""
-            if asset_id in self.last_trade_price:
-                last_price = self.last_trade_price[asset_id]
-                last_trade_str = f" | Last Trade: {Colors.MAGENTA}{last_price:.4f}{Colors.RESET}"
-            
             # Truncate asset ID for readability
             asset_display = asset_id[:20] + "..." if len(asset_id) > 20 else asset_id
             
-            print(f"[{self._get_timestamp()}]{Colors.BOLD}[BOOK]{Colors.RESET} "
-                  f"Asset: {asset_display} | "
-                  f"Bid: {bid_str} | "
-                  f"Ask: {ask_str}"
-                  f"{mid_str}"
-                  f"{spread_str}"
-                  f"{last_trade_str}")
+            # Show full order book if enabled
+            if self.show_full_book and (bids or asks):
+                self._display_full_book(asset_id, asset_display, bids, asks, mid_price, spread, spread_bps)
+            else:
+                # Show compact summary
+                self._display_book_summary(asset_id, asset_display, best_bid, best_ask, mid_price, spread, spread_bps)
                   
         except Exception as e:
             self._log(f"❌ Error processing book: {e}", Colors.RED)
+    
+    def _display_book_summary(self, asset_id: str, asset_display: str, best_bid: Optional[float], 
+                             best_ask: Optional[float], mid_price: Optional[float], 
+                             spread: Optional[float], spread_bps: Optional[float]):
+        """Display compact book summary (original format)"""
+        # Format output
+        bid_str = f"{Colors.GREEN}{best_bid:.4f}{Colors.RESET}" if best_bid else "N/A"
+        ask_str = f"{Colors.RED}{best_ask:.4f}{Colors.RESET}" if best_ask else "N/A"
+        
+        # Add mid-price
+        mid_str = f" | Mid: {Colors.CYAN}{mid_price:.4f}{Colors.RESET}" if mid_price else ""
+        
+        # Add spread
+        spread_str = ""
+        if spread and spread_bps:
+            # Color code spread: green if tight (<1%), yellow if medium, red if wide
+            spread_pct = spread_bps / 100
+            if spread_pct < 1:
+                spread_color = Colors.GREEN
+            elif spread_pct < 5:
+                spread_color = Colors.YELLOW
+            else:
+                spread_color = Colors.RED
+            spread_str = f" | Spread: {spread_color}{spread:.4f} ({spread_bps:.1f} bps){Colors.RESET}"
+        
+        # Add last trade price if available
+        last_trade_str = ""
+        if asset_id in self.last_trade_price:
+            last_price = self.last_trade_price[asset_id]
+            last_trade_str = f" | Last Trade: {Colors.MAGENTA}{last_price:.4f}{Colors.RESET}"
+        
+        print(f"[{self._get_timestamp()}]{Colors.BOLD}[BOOK]{Colors.RESET} "
+              f"Asset: {asset_display} | "
+              f"Bid: {bid_str} | "
+              f"Ask: {ask_str}"
+              f"{mid_str}"
+              f"{spread_str}"
+              f"{last_trade_str}")
+    
+    def _display_full_book(self, asset_id: str, asset_display: str, bids: list, asks: list,
+                          mid_price: Optional[float], spread: Optional[float], spread_bps: Optional[float]):
+        """Display full order book with depth"""
+        print(f"\n{Colors.BOLD}{'='*80}{Colors.RESET}")
+        print(f"{Colors.BOLD}[{self._get_timestamp()}] ORDER BOOK - Asset: {asset_display}{Colors.RESET}")
+        
+        # Show mid-price and spread
+        if mid_price:
+            spread_pct = spread_bps / 100 if spread_bps else 0
+            spread_color = Colors.GREEN if spread_pct < 1 else (Colors.YELLOW if spread_pct < 5 else Colors.RED)
+            print(f"Mid: {Colors.CYAN}{mid_price:.4f}{Colors.RESET} | "
+                  f"Spread: {spread_color}{spread:.4f} ({spread_bps:.1f} bps){Colors.RESET}")
+        
+        # Show last trade if available
+        if asset_id in self.last_trade_price:
+            print(f"Last Trade: {Colors.MAGENTA}{self.last_trade_price[asset_id]:.4f}{Colors.RESET}")
+        
+        print(f"{Colors.BOLD}{'-'*80}{Colors.RESET}")
+        
+        # Filter and display asks - only show levels closest to best ask
+        print(f"{Colors.BOLD}{Colors.RED}ASKS (Sell Orders):{Colors.RESET}")
+        print(f"{'Price':<12} {'Size':<15} {'Cumulative':<15}")
+        
+        cumulative_ask_size = 0
+        # API returns asks sorted HIGHEST to LOWEST (0.99 -> 0.44)
+        # We want the LAST X items (closest to mid-price)
+        display_asks = asks[-self.BOOK_DEPTH:] if len(asks) > self.BOOK_DEPTH else asks
+        
+        # Display from highest to lowest (furthest to closest to mid)
+        # display_asks is already in correct order after slicing
+        for ask in display_asks:
+            price = float(ask.get('price', 0))
+            size = float(ask.get('size', 0))
+            cumulative_ask_size += size
+            print(f"{Colors.RED}{price:<12.4f}{Colors.RESET} {size:<15.2f} {cumulative_ask_size:<15.2f}")
+        
+        # Show mid-price line
+        if mid_price:
+            print(f"{Colors.CYAN}{'─'*12} MID: {mid_price:.4f} {'─'*50}{Colors.RESET}")
+        
+        # Filter and display bids - only show levels closest to best bid
+        print(f"{Colors.BOLD}{Colors.GREEN}BIDS (Buy Orders):{Colors.RESET}")
+        print(f"{'Price':<12} {'Size':<15} {'Cumulative':<15}")
+        
+        cumulative_bid_size = 0
+        # API returns bids sorted LOWEST to HIGHEST (0.01 -> 0.43)
+        # We want the LAST X items (closest to mid-price)
+        display_bids = bids[-self.BOOK_DEPTH:] if len(bids) > self.BOOK_DEPTH else bids
+        
+        # Reverse to show from highest (closest to mid) to lowest (furthest from mid)
+        for bid in reversed(display_bids):
+            price = float(bid.get('price', 0))
+            size = float(bid.get('size', 0))
+            cumulative_bid_size += size
+            print(f"{Colors.GREEN}{price:<12.4f}{Colors.RESET} {size:<15.2f} {cumulative_bid_size:<15.2f}")
+        
+        # Show total liquidity
+        total_liquidity = cumulative_bid_size + cumulative_ask_size
+        print(f"{Colors.BOLD}{'-'*80}{Colors.RESET}")
+        print(f"Total Liquidity (top {self.BOOK_DEPTH} levels): {Colors.CYAN}{total_liquidity:.2f}{Colors.RESET}")
+        
+        # Show warning if spread is very wide (indicates low liquidity)
+        if spread_bps and spread_bps > 10000:  # > 100% spread
+            print(f"{Colors.YELLOW}⚠️  Warning: Very wide spread indicates low liquidity{Colors.RESET}")
+        
+        print(f"{Colors.BOLD}{'='*80}{Colors.RESET}\n")
     
     async def _handle_message(self, message):
         """Process incoming WebSocket message"""
@@ -426,12 +508,18 @@ async def main():
     print("=" * 70)
     print(f"{Colors.RESET}\n")
     
+    # Check for --full-book flag
+    show_full_book = "--full-book" in sys.argv
+    if show_full_book:
+        print(f"{Colors.GREEN}📊 Full order book mode enabled{Colors.RESET}\n")
+    
     # Example asset IDs - Replace with actual token IDs from Gamma API
     # To find asset IDs for LPL matches, see the documentation at the top of this file
     
     print(f"{Colors.YELLOW}Enter asset IDs to monitor (comma-separated):{Colors.RESET}")
     print(f"{Colors.YELLOW}Example: 21742633143463906290569050155826241533067272736897614950488156847949938836455{Colors.RESET}")
     print(f"{Colors.YELLOW}Or press Enter to use demo mode with example IDs:{Colors.RESET}")
+    print(f"{Colors.YELLOW}Tip: Run with --full-book flag to show full order book depth{Colors.RESET}")
     
     user_input = input("> ").strip()
     
@@ -450,7 +538,7 @@ async def main():
         return
     
     # Create and start monitor
-    monitor = PolymarketCLOBMonitor(asset_ids)
+    monitor = PolymarketCLOBMonitor(asset_ids, show_full_book=show_full_book)
     
     try:
         await monitor.start()
