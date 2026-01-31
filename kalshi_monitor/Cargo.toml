@@ -1,0 +1,36 @@
+[package]
+name = "kalshi_monitor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime - required for WebSocket connections
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# JSON serialization/deserialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Environment variables
+dotenv = "0.15"
+
+# Error handling
+anyhow = "1"
+
+# Terminal colors
+colored = "2"
+
+# HTTP client for REST API calls
+reqwest = { version = "0.11", features = ["json"] }
+
+# URL parsing
+url = "2"
+
+# Futures utilities
+futures-util = "0.3"
+
+# Date/time formatting
+chrono = "0.4"
