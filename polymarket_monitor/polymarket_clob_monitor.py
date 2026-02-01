@@ -45,6 +45,8 @@ from typing import Dict, List, Optional, Set
 from collections import deque
 from dataclasses import dataclass
 import sys
+import argparse
+import requests
 
 
 # ANSI color codes for terminal output
@@ -498,9 +500,90 @@ class PolymarketCLOBMonitor:
             except Exception:
                 pass  # Already closed
 
+def resolve_slug(slug: str) -> List[str]:
+    """
+    Resolve Polymarket event slug to asset IDs for Match Winner.
+    Returns a list of asset IDs.
+    """
+    print(f"{Colors.YELLOW}🔍 Resolving Polymarket slug: {slug}...{Colors.RESET}")
+    
+    # Extract anchor from slug (e.g., "dota2-vg-yb1" -> "vg")
+    parts = slug.split('-')
+    if len(parts) < 2:
+        print(f"{Colors.RED}❌ Invalid slug format: {slug}{Colors.RESET}")
+        return []
+    
+    # For esports/sports, the first team is typically the second part
+    # but we'll try to be smart about it.
+    anchor = parts[1].lower()
+    
+    try:
+        url = "https://gamma-api.polymarket.com/events"
+        response = requests.get(url, params={"slug": slug})
+        response.raise_for_status()
+        
+        events = response.json()
+        if not events:
+            print(f"{Colors.RED}❌ No event found for slug: {slug}{Colors.RESET}")
+            return []
+            
+        event = events[0]
+        markets = event.get("markets", [])
+        
+        # Find the match winner market: usually the one that doesn't contain sub-market keywords
+        market = None
+        for m in markets:
+            q = m.get("question", "").lower()
+            if not any(k in q for k in ["game", "blood", "handicap", "o/u", "spread", "total", "half", "1h", "2h"]):
+                market = m
+                break
+        
+        if not market:
+            market = markets[0] if markets else None
+            
+        if not market:
+            print(f"{Colors.RED}❌ No markets found in event{Colors.RESET}")
+            return []
+
+        print(f"{Colors.GREEN}✓ Resolved Question: {market.get('question')}{Colors.RESET}")
+        
+        clob_token_ids_raw = market.get("clobTokenIds", "[]")
+        outcomes_raw = market.get("outcomes", "[]")
+        
+        token_ids = json.loads(clob_token_ids_raw)
+        outcomes = json.loads(outcomes_raw)
+        
+        print(f"  Outcomes Found: {outcomes}")
+        
+        # Look for anchor in outcomes
+        target_index = None
+        for i, outcome in enumerate(outcomes):
+            if anchor in outcome.lower():
+                target_index = i
+                print(f"{Colors.GREEN}✓ Selected Outcome: {outcome} (index {i}){Colors.RESET}")
+                break
+        
+        if target_index is not None:
+            asset_id = token_ids[target_index]
+            return [asset_id]
+        else:
+            print(f"{Colors.YELLOW}⚠️  Warning: Anchor team '{anchor}' not found in outcomes. Using all tokens.{Colors.RESET}")
+            return token_ids
+            
+    except Exception as e:
+        print(f"{Colors.RED}❌ Error resolving slug: {e}{Colors.RESET}")
+        return []
+
 
 async def main():
     """Main entry point"""
+    parser = argparse.ArgumentParser(description="Polymarket CLOB Real-Time Monitor")
+    parser.add_argument("--slug", type=str, help="Polymarket event slug to monitor")
+    parser.add_argument("--asset-id", type=str, help="Comma-separated asset IDs to monitor")
+    parser.add_argument("--full-book", action="store_true", help="Show full order book depth")
+    
+    args = parser.parse_args()
+    
     print(f"{Colors.BOLD}{Colors.CYAN}")
     print("=" * 70)
     print("  Polymarket CLOB Real-Time Monitor")
@@ -508,33 +591,38 @@ async def main():
     print("=" * 70)
     print(f"{Colors.RESET}\n")
     
-    # Check for --full-book flag
-    show_full_book = "--full-book" in sys.argv
+    show_full_book = args.full_book
     if show_full_book:
         print(f"{Colors.GREEN}📊 Full order book mode enabled{Colors.RESET}\n")
     
-    # Example asset IDs - Replace with actual token IDs from Gamma API
-    # To find asset IDs for LPL matches, see the documentation at the top of this file
+    asset_ids = []
     
-    print(f"{Colors.YELLOW}Enter asset IDs to monitor (comma-separated):{Colors.RESET}")
-    print(f"{Colors.YELLOW}Example: 21742633143463906290569050155826241533067272736897614950488156847949938836455{Colors.RESET}")
-    print(f"{Colors.YELLOW}Or press Enter to use demo mode with example IDs:{Colors.RESET}")
-    print(f"{Colors.YELLOW}Tip: Run with --full-book flag to show full order book depth{Colors.RESET}")
+    if args.slug:
+        asset_ids = resolve_slug(args.slug)
+    elif args.asset_id:
+        asset_ids = [aid.strip() for aid in args.asset_id.split(",") if aid.strip()]
     
-    user_input = input("> ").strip()
-    
-    if user_input:
-        asset_ids = [aid.strip() for aid in user_input.split(",") if aid.strip()]
-    else:
-        # Demo mode with example asset IDs
-        asset_ids = [
-            "21742633143463906290569050155826241533067272736897614950488156847949938836455",
-            # Add more demo IDs here
-        ]
-        print(f"{Colors.CYAN}Using demo mode with example asset IDs{Colors.RESET}\n")
+    # If no CLI arguments, fall back to interactive mode
+    if not asset_ids:
+        print(f"{Colors.YELLOW}Enter asset IDs to monitor (comma-separated):{Colors.RESET}")
+        print(f"{Colors.YELLOW}Example: 21742633143463906290569050155826241533067272736897614950488156847949938836455{Colors.RESET}")
+        print(f"{Colors.YELLOW}Or enter a slug to resolve it:{Colors.RESET}")
+        print(f"{Colors.YELLOW}Example slug: dota2-vg-yb1-2026-02-01{Colors.RESET}")
+        
+        user_input = input("> ").strip()
+        
+        if user_input:
+            if "-" in user_input and "." not in user_input and len(user_input) < 100:
+                asset_ids = resolve_slug(user_input)
+            else:
+                asset_ids = [aid.strip() for aid in user_input.split(",") if aid.strip()]
+        else:
+            # Demo mode
+            asset_ids = ["21742633143463906290569050155826241533067272736897614950488156847949938836455"]
+            print(f"{Colors.CYAN}Using demo mode with example asset IDs{Colors.RESET}\n")
     
     if not asset_ids:
-        print(f"{Colors.RED}❌ No asset IDs provided. Exiting.{Colors.RESET}")
+        print(f"{Colors.RED}❌ No asset IDs provided or resolved. Exiting.{Colors.RESET}")
         return
     
     # Create and start monitor
